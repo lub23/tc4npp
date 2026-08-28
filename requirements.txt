@@ -1,0 +1,9 @@
+cdsapi
+numpy<2
+pandas
+matplotlib
+geopandas
+cartopy
+rasterio
+scipy
+pygrib

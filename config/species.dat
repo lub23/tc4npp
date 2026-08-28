@@ -1,0 +1,22 @@
+[species]
+Cs137 I131
+
+
+[belot_below_cloud]
+
+# Coefficients a and b for the Belot parameterization (a * po^b)
+#  where po is the rain intensity  [mm / h].
+
+# species       a       b
+Cs137        8.e-05  0.8
+I131        8.e-05  0.8
+
+[belot_in_cloud]
+all        4.2e-04  0.79
+
+
+[half_life]
+
+# Half-lives in days, put 0 for species without decay.
+Cs137         1.1e4
+I131         8.04

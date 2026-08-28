@@ -1,0 +1,56 @@
+
+[source]
+# source name (should be unique)
+ID: Cs137
+
+# Npp
+Abscissa: 117.50
+Ordinate: 23.83
+Altitude: 20.
+
+Species: Cs137
+
+Type: continuous
+# Rate per second, Bq s^{-1}
+Rate: 1.157e+11
+Date_beg: 2023-07-27_15-00-00
+Date_end: 2023-07-29_14-59-00
+
+# Source velocity (m/s)
+Velocity = 0.
+# Source temperature (Celsius degrees)
+Temperature = 0.
+# Source diameter (m)
+Diameter = 0.
+
+IsVolumeSource: no
+Source_water: 0.0
+
+[source]
+
+# source name (should be unique)
+ID: I131
+
+# Npp
+Abscissa: 117.50
+Ordinate: 23.83
+Altitude: 20.
+
+Species: I131
+
+Type: continuous
+# Rate per second, Bq s^{-1}
+Rate: 5.787e+11
+Date_beg: 2023-07-27_15-00-00
+Date_end: 2023-07-29_14-59-00
+
+# Source velocity (m/s)
+Velocity = 0.
+# Source temperature (Celsius degrees)
+Temperature = 0.
+# Source diameter (m)
+Diameter = 0.
+
+IsVolumeSource: no
+Source_water: 0.0
+

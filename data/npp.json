@@ -1,0 +1,24 @@
+{
+  "NPP": {
+    "Xudabao": {"Abscissa": "120.55", "Ordinate": "40.35", "en_name": "Xudabao"},
+    "Hongyanhe": {"Abscissa": "121.48", "Ordinate": "39.80", "en_name": "Hongyanhe"},
+    "Shidaowan": {"Abscissa": "122.53", "Ordinate": "36.97", "en_name": "Shidaowan"},
+    "Haiyang": {"Abscissa": "121.38", "Ordinate": "36.71", "en_name": "Haiyang"},
+    "Tianwan": {"Abscissa": "119.46", "Ordinate": "34.69", "en_name": "Tianwan"},
+    "Qinshan": {"Abscissa": "120.96", "Ordinate": "30.44", "en_name": "Qinshan"},
+    "Sanmen": {"Abscissa": "121.64", "Ordinate": "29.10", "en_name": "Sanmen"},
+    "San'ao": {"Abscissa": "120.46", "Ordinate": "27.27", "en_name": "San'ao"},
+    "Ningde": {"Abscissa": "120.29", "Ordinate": "27.04", "en_name": "Ningde"},
+    "Fuqing": {"Abscissa": "119.45", "Ordinate": "25.44", "en_name": "Fuqing"},
+    "Zhangzhou": {"Abscissa": "117.50", "Ordinate": "23.83", "en_name": "Zhangzhou"},
+    "Lufeng": {"Abscissa": "115.83", "Ordinate": "22.75", "en_name": "Lufeng"},
+    "Taiping mountain": {"Abscissa": "114.99", "Ordinate": "22.70", "en_name": "Taiping Mountain"},
+    "Ling'ao": {"Abscissa": "114.56", "Ordinate": "22.60", "en_name": "Ling'ao"},
+    "Daya Bay": {"Abscissa": "114.55", "Ordinate": "22.60", "en_name": "Daya Bay"},
+    "Taishan": {"Abscissa": "112.99", "Ordinate": "21.92", "en_name": "Taishan"},
+    "Yangjiang": {"Abscissa": "112.27", "Ordinate": "21.71", "en_name": "Yangjiang"},
+    "Lianjiang": {"Abscissa": "109.83", "Ordinate": "21.52", "en_name": "Lianjiang"},
+    "Fangchenggang": {"Abscissa": "108.57", "Ordinate": "21.66", "en_name": "Fangchenggang"},
+    "Changjiang": {"Abscissa": "108.90", "Ordinate": "19.46", "en_name": "Changjiang"}
+  }
+}
