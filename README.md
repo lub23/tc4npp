@@ -152,11 +152,4 @@ historical data archive is not included in this repository.
 
 ## Citation
 
-If you use TC4NPP in academic work, please cite the archived software release:
-
-> TC4NPP developers (2026). *TC4NPP: Climate-informed assessment of
-> non-stationary tropical cyclone exposure and radiological consequences for
-> coastal nuclear power plants* (Version 1.1.0) [Computer software]. GitHub.
-> https://github.com/lub23/tc4npp
-
-Please also cite the associated manuscript when it becomes available.
+https://doi.org/10.5281/zenodo.24389428
