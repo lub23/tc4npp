@@ -99,9 +99,64 @@ includes 2020-2024 CMA best-track data as a small runnable example:
 python -m tcin.index_analysis --start-year 2020 --end-year 2024
 ```
 
+The default weight is Gaussian. Monthly TCIN is unsmoothed by default, while
+annual trends and spectral analysis retain Savitzky-Golay smoothing. Add
+`--monthly-map` to create the monthly spatial figure alongside the monthly
+distributions.
+
 Create the final radiological impact comparison figure directly from the event
 comparison table:
 
 ```bash
 python -m tcin.impact_figures
 ```
+
+### Annual trends
+
+`tcin.index_analysis` can also plot Figure 2 from an NPZ archive with `years`,
+`names` and `values`. Values are unsmoothed annual TCIN normalized against the
+full historical reference, with the twenty sites in manuscript order along rows:
+
+```bash
+python -m tcin.index_analysis \
+  --annual-input /path/to/annual_raw.npz \
+  --annual-output-prefix figures/figure_2
+```
+
+The figure shows all twenty sites and four regional summaries. Asterisks
+preceding the fitted slope indicate conventional OLS significance at
+`p < 0.05`, `p < 0.01` and `p < 0.001`. The same slopes, standard errors and
+p-values are written to `figures/figure_2_trends.csv`. Use
+`--subset-output-prefix` for an additional 1980-2024 plot.
+
+### Regional comparison
+
+`tcin.period_group_comparison` reproduces the manuscript Figure 3 layout for a
+selected period, with pairwise Mann-Whitney brackets and stars:
+
+```bash
+python -m tcin.period_group_comparison \
+  --input /path/to/annual_raw.npz \
+  --start-year 1980 --end-year 2024 \
+  --output-prefix figures/figure_3_1980_2024
+```
+
+The NPZ contains `years`, `names` and `values`: consecutive calendar years,
+the twenty sites in manuscript order, and a site-by-year array of unsmoothed
+annual TCIN normalized using the full historical reference. The module keeps
+that normalization and applies the annual Savitzky-Golay filter separately
+within the selected period. It exports PNG, PDF, SVG, descriptive site and
+group CSVs, and processing metadata. Use `--reference-output-prefix` to draw
+the full input record with the same style and scatter positions. The complete
+historical data archive is not included in this repository.
+
+## Citation
+
+If you use TC4NPP in academic work, please cite the archived software release:
+
+> TC4NPP developers (2026). *TC4NPP: Climate-informed assessment of
+> non-stationary tropical cyclone exposure and radiological consequences for
+> coastal nuclear power plants* (Version 1.1.0) [Computer software]. GitHub.
+> https://github.com/lub23/tc4npp
+
+Please also cite the associated manuscript when it becomes available.

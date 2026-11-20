@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List
@@ -18,8 +19,10 @@ import matplotlib.gridspec as gridspec
 import numpy as np
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
-from scipy import signal
+from matplotlib.ticker import FixedLocator, FuncFormatter
+from scipy import signal, stats
 from scipy.interpolate import interp1d
+from scipy.ndimage import gaussian_filter1d
 
 from src.config import NPP
 
@@ -195,8 +198,8 @@ def _distance_weight(
     raise ValueError(f"Unknown distance weighting method: {method}")
 
 
-def _smooth(values: np.ndarray, method: str) -> np.ndarray:
-    if len(values) < 5 or method == "none":
+def _smooth(values: np.ndarray, method: str | None) -> np.ndarray:
+    if len(values) < 5 or method in (None, "none"):
         return values
     if method == "savgol":
         window = min(9, len(values) if len(values) % 2 else len(values) - 1)
@@ -207,7 +210,7 @@ def _smooth(values: np.ndarray, method: str) -> np.ndarray:
         except ValueError:
             return values
     if method == "gaussian":
-        return signal.gaussian_filter1d(values, 1.5)
+        return gaussian_filter1d(values, 1.5)
     if method == "moving_average":
         smoothed = np.convolve(values, np.ones(5) / 5.0, mode="same")
         smoothed[0], smoothed[-1] = values[0], values[-1]
@@ -249,6 +252,7 @@ def calculate_yearly_indices(
                     weighted_gust_sum += record.wind**2 * weight
                     weight_sum += weight
                 annual_index += weighted_gust_sum / weight_sum if weight_sum else 0.0
+            annual_index /= len(year_typhoons)
             raw_indices[npp_name][year] = annual_index
             maximum_index = max(maximum_index, annual_index)
 
@@ -265,7 +269,7 @@ def calculate_monthly_indices(
     typhoons: Iterable[Typhoon],
     npp_data: Dict[str, dict],
     weight_method: str = "inverse",
-    smoothing: str = "savgol",
+    smoothing: str | None = None,
     gust_threshold: float = 13.9,
 ) -> dict[str, dict[int, dict[int, float]]]:
     """Return normalized monthly TCIN, preserving the original per-month climatology."""
@@ -316,7 +320,7 @@ def calculate_monthly_indices(
                 continue
             years = sorted(year_values)
             values = np.array([year_values[year] / maximum_index for year in years])
-            values = _smooth(values, smoothing)
+            values = np.clip(_smooth(values, smoothing), 0.0, 1.0)
             smoothed_indices[npp_name][month] = dict(zip(years, values.tolist()))
     return smoothed_indices
 
@@ -336,88 +340,199 @@ def _scientific(value: float) -> str:
     return rf"{mantissa:.2f}\times10^{{{exponent}}}"
 
 
-def plot_yearly_trends(
-    raw_indices: dict[str, dict[int, float]],
-    smoothed_indices: dict[str, dict[int, float]],
-    npp_data: Dict[str, dict],
-    figure_dir: str | Path = DEFAULT_FIGURE_DIR,
-) -> dict:
-    """Plot annual TCIN for individual sites and regional summaries."""
-    figure_dir = Path(figure_dir)
-    figure_dir.mkdir(parents=True, exist_ok=True)
-    npp_names = list(raw_indices)
-    groups = _group_names(npp_names)
-    all_values = [
-        value for values in smoothed_indices.values() for value in values.values()
-    ]
-    low, high = min(all_values), max(all_values)
-    margin = (high - low) * 0.1
-    y_limits = (low - margin, high + margin)
+def _stars(pvalue: float) -> str:
+    if pvalue < 0.001:
+        return "***"
+    if pvalue < 0.01:
+        return "**"
+    if pvalue < 0.05:
+        return "*"
+    return ""
 
-    fig = plt.figure(figsize=(16, 20))
+
+def _fit_trend(years: np.ndarray, values: np.ndarray) -> dict:
+    if np.ptp(values) == 0:
+        slope, standard_error, pvalue = 0.0, 0.0, 1.0
+    else:
+        fitted = stats.linregress(years, values)
+        slope = float(fitted.slope)
+        standard_error = float(fitted.stderr)
+        pvalue = float(fitted.pvalue)
+    return {
+        "slope": slope,
+        "se": standard_error,
+        "p": pvalue,
+        "stars": _stars(pvalue),
+    }
+
+
+def _annual_records(
+    years: np.ndarray,
+    names: List[str],
+    values: np.ndarray,
+) -> list[dict]:
+    records = []
+    for name, site_values in zip(names, values):
+        record = {
+            "start": int(years[0]),
+            "end": int(years[-1]),
+            "series_type": "site",
+            "label": str(name),
+        }
+        record.update(_fit_trend(years, site_values))
+        records.append(record)
+    for label, group in zip("ABCD", _group_names(names)):
+        record = {
+            "start": int(years[0]),
+            "end": int(years[-1]),
+            "series_type": "group",
+            "label": label,
+        }
+        group_values = values[
+            names.index(group[0]) : names.index(group[-1]) + 1
+        ].mean(axis=0)
+        record.update(_fit_trend(years, group_values))
+        records.append(record)
+    return records
+
+
+def _export_annual_records(records: list[dict], prefix: Path) -> None:
+    path = prefix.with_name(prefix.name + "_trends.csv")
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(records[0]))
+        writer.writeheader()
+        writer.writerows(records)
+
+
+def _render_yearly_trends(
+    years: np.ndarray,
+    names: List[str],
+    values: np.ndarray,
+    records: list[dict],
+    output_prefix: Path,
+    display_names: List[str],
+    y_limits: tuple[float, float] | None = None,
+) -> None:
+    by_site = {row["label"]: row for row in records if row["series_type"] == "site"}
+    by_group = {row["label"]: row for row in records if row["series_type"] == "group"}
+    if y_limits is None:
+        low, high = float(values.min()), float(values.max())
+        margin = 0.1 * (high - low) if high > low else 0.1
+        y_limits = (low - margin, high + margin)
+
+    fig = plt.figure(figsize=(16, 22.5))
     grid = gridspec.GridSpec(
-        8, 4,
-        hspace=0.12, wspace=0.10, left=0.08, right=0.98, top=0.93, bottom=0.08,
-        height_ratios=[0.02, 1, 1, 1, 1, 1, 1, 1],
+        9,
+        4,
+        hspace=0.12,
+        wspace=0.10,
+        left=0.08,
+        right=0.98,
+        top=0.93,
+        bottom=0.08,
+        height_ratios=[0.02] + [1] * 8,
     )
-    slopes = []
-    site_number = 0
-    for column, (group, region) in enumerate(zip(groups, REGION_NAMES)):
-        title_ax = fig.add_subplot(grid[0, column])
-        title_ax.axis("off")
-        title_ax.text(0, 0.95, f"({chr(97 + column)}) {region}",
-                      transform=title_ax.transAxes, ha="left", va="top",
-                      fontweight="bold")
-
-        regional = {}
-        for row, npp_name in enumerate(group):
-            site_number += 1
-            ax = fig.add_subplot(grid[row + 1, column])
-            years = sorted(smoothed_indices[npp_name])
-            values = [smoothed_indices[npp_name][year] for year in years]
-            for year, value in zip(years, values):
-                regional.setdefault(year, []).append(value)
-
-            try:
-                slope, intercept = np.polyfit(years, values, 1)
-            except (np.linalg.LinAlgError, ValueError):
-                slope, intercept = 0.0, float(np.mean(values))
-            slopes.append(slope)
-            ax.plot(years, values, "o", color=NATURE_COLORS[0], markersize=3, alpha=0.6)
-            ax.plot(years, np.poly1d((slope, intercept))(years),
-                    "--", color=NATURE_COLORS[1], linewidth=1.5)
-            ax.text(0.02, 0.95, f"{site_number}. {npp_data[npp_name]['en_name']}",
-                    transform=ax.transAxes, ha="left", va="top")
-            ax.text(0.93, 0.80, rf"$\mathrm{{k}}={_scientific(slope)}$",
-                    transform=ax.transAxes, ha="right", va="top",
-                    color=NATURE_COLORS[1])
+    for column, (group, region) in enumerate(zip(_group_names(names), REGION_NAMES)):
+        title = fig.add_subplot(grid[0, column])
+        title.axis("off")
+        title.text(
+            0,
+            0.95,
+            f"({chr(97 + column)}) {region}",
+            transform=title.transAxes,
+            ha="left",
+            va="top",
+            fontsize=20,
+            fontweight="bold",
+        )
+        for row, npp_name in enumerate(group, 1):
+            ax = fig.add_subplot(grid[row, column])
+            site_index = names.index(npp_name)
+            result = by_site[npp_name]
+            site_values = values[site_index]
+            fitted = site_values.mean() + result["slope"] * (years - years.mean())
+            ax.plot(years, site_values, "o", color=NATURE_COLORS[0], markersize=3, alpha=0.6)
+            ax.plot(years, fitted, "--", color=NATURE_COLORS[1], linewidth=1.5)
+            ax.text(
+                0.02,
+                0.95,
+                f"{site_index + 1}. {display_names[site_index]}",
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=20,
+                bbox=dict(facecolor="white", edgecolor="none", alpha=0.9, pad=1),
+            )
+            symbol = f"{result['stars']} " if result["stars"] else ""
+            ax.text(
+                0.94,
+                0.70,
+                symbol + rf"$\mathrm{{k}}={_scientific(result['slope'])}$",
+                transform=ax.transAxes,
+                ha="right",
+                va="top",
+                fontsize=18,
+                color=NATURE_COLORS[1],
+                bbox=dict(facecolor="white", edgecolor="none", alpha=0.9, pad=1),
+            )
             ax.set_ylim(y_limits)
             ax.grid(True, alpha=0.2, linewidth=0.5)
             if column:
                 ax.set_yticklabels([])
-            ax.set_xticklabels([])
+            ax.tick_params(axis="x", labelbottom=False)
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
 
-        ax_summary = fig.add_subplot(grid[7, column])
-        years = sorted(regional)
-        means = np.array([np.mean(regional[year]) for year in years])
-        stds = np.array([np.std(regional[year]) for year in years])
-        try:
-            slope, intercept = np.polyfit(years, means, 1)
-        except (np.linalg.LinAlgError, ValueError):
-            slope, intercept = 0.0, float(np.mean(means))
-        ax_summary.fill_between(years, means - stds, means + stds,
-                                alpha=0.25, color=NATURE_COLORS[2], label="±1 SD")
-        ax_summary.plot(years, means, "o-", color=NATURE_COLORS[0],
-                        markersize=4, linewidth=1, label="Mean")
-        ax_summary.plot(years, np.poly1d((slope, intercept))(years),
-                        "--", color=NATURE_COLORS[1], linewidth=1.5)
-        ax_summary.text(0.02, 0.95, "Mean±SD", transform=ax_summary.transAxes,
-                        ha="left", va="top")
-        ax_summary.text(0.93, 0.80, rf"$\mathrm{{k}}={_scientific(slope)}$",
-                        transform=ax_summary.transAxes, ha="right", va="top",
-                        color=NATURE_COLORS[1])
+        ax_summary = fig.add_subplot(grid[8, column])
+        group_start = names.index(group[0])
+        group_stop = names.index(group[-1]) + 1
+        means = values[group_start:group_stop].mean(axis=0)
+        stds = values[group_start:group_stop].std(axis=0)
+        result = by_group["ABCD"[column]]
+        ax_summary.fill_between(
+            years,
+            means - stds,
+            means + stds,
+            alpha=0.25,
+            color=NATURE_COLORS[2],
+        )
+        ax_summary.plot(
+            years,
+            means,
+            "o-",
+            color=NATURE_COLORS[0],
+            markersize=4,
+            linewidth=1,
+            alpha=0.8,
+        )
+        ax_summary.plot(
+            years,
+            means.mean() + result["slope"] * (years - years.mean()),
+            "--",
+            color=NATURE_COLORS[1],
+            linewidth=1.5,
+        )
+        ax_summary.text(
+            0.02,
+            0.95,
+            "Mean±SD",
+            transform=ax_summary.transAxes,
+            ha="left",
+            va="top",
+            fontsize=20,
+        )
+        symbol = f"{result['stars']} " if result["stars"] else ""
+        ax_summary.text(
+            0.94,
+            0.70,
+            symbol + rf"$\mathrm{{k}}={_scientific(result['slope'])}$",
+            transform=ax_summary.transAxes,
+            ha="right",
+            va="top",
+            fontsize=18,
+            color=NATURE_COLORS[1],
+            bbox=dict(facecolor="white", edgecolor="none", alpha=0.9, pad=1),
+        )
         ax_summary.set_ylim(y_limits)
         ax_summary.grid(True, alpha=0.2, linewidth=0.5)
         ax_summary.set_facecolor("#F5F5F5")
@@ -426,30 +541,157 @@ def plot_yearly_trends(
         ax_summary.spines["top"].set_visible(False)
         ax_summary.spines["right"].set_visible(False)
 
-    fig.text(0.02, 0.5, "TCIN Intensity", va="center", rotation="vertical")
-    fig.text(0.5, 0.05, "Year", ha="center")
-    legend_ax = fig.add_subplot(grid[4, 3])
-    legend_ax.axis("off")
-    legend_ax.legend(handles=[
-        Line2D([], [], marker="o", color="w", markerfacecolor=NATURE_COLORS[0],
-               markersize=5, linestyle="None", label="Annual TCIN"),
-        Line2D([], [], color=NATURE_COLORS[1], linestyle="--", linewidth=1.5,
-               label="Trend line"),
-    ], loc="center", frameon=False, ncol=1, labelspacing=1.2)
-    legend_ax_summary = fig.add_subplot(grid[6, 3])
-    legend_ax_summary.axis("off")
-    legend_ax_summary.legend(handles=[
-        Patch(facecolor=NATURE_COLORS[2], alpha=0.25,
-              edgecolor=NATURE_COLORS[2], label="±1 SD"),
-        Line2D([], [], color=NATURE_COLORS[0], marker="o", markersize=5,
-               linewidth=1, label="Mean"),
-    ], loc="center", frameon=False, ncol=1, labelspacing=1.2)
+    fig.text(0.02, 0.5, "TCIN Intensity", va="center", rotation="vertical", fontsize=20)
+    fig.text(0.5, 0.05, "Year", ha="center", fontsize=20)
+    for row, handles in [
+        (
+            4,
+            [
+                Line2D(
+                    [],
+                    [],
+                    marker="o",
+                    color="w",
+                    markerfacecolor=NATURE_COLORS[0],
+                    markersize=4,
+                    linestyle="None",
+                    label="Annual TCIN",
+                ),
+                Line2D(
+                    [],
+                    [],
+                    color=NATURE_COLORS[1],
+                    linestyle="--",
+                    linewidth=1.5,
+                    label="Trend line",
+                ),
+            ],
+        ),
+        (
+            6,
+            [
+                Patch(
+                    facecolor=NATURE_COLORS[2],
+                    alpha=0.25,
+                    edgecolor=NATURE_COLORS[2],
+                    label="±1 SD",
+                ),
+                Line2D(
+                    [],
+                    [],
+                    color=NATURE_COLORS[0],
+                    marker="o",
+                    markersize=4,
+                    linewidth=1,
+                    label="Mean",
+                ),
+            ],
+        ),
+    ]:
+        ax = fig.add_subplot(grid[row, 3])
+        ax.axis("off")
+        ax.legend(
+            handles=handles,
+            loc="center",
+            fontsize=18,
+            frameon=False,
+            labelspacing=1.2,
+        )
 
-    output = figure_dir / "plot_yearly_trends.png"
-    fig.savefig(output, dpi=300, bbox_inches="tight")
+    output_prefix.parent.mkdir(parents=True, exist_ok=True)
+    for extension in ("png", "pdf", "svg"):
+        fig.savefig(
+            output_prefix.with_suffix(f".{extension}"),
+            dpi=300,
+            bbox_inches="tight",
+        )
     plt.close(fig)
-    print(f"Saved: {output}")
+
+
+def plot_yearly_trends(
+    raw_indices: dict[str, dict[int, float]],
+    smoothed_indices: dict[str, dict[int, float]],
+    npp_data: Dict[str, dict],
+    figure_dir: str | Path = DEFAULT_FIGURE_DIR,
+) -> dict:
+    """Plot annual TCIN with fit significance and export the fit statistics."""
+    names = list(raw_indices)
+    years = np.array(sorted(raw_indices[names[0]]))
+    values = np.array(
+        [[smoothed_indices[name][int(year)] for year in years] for name in names]
+    )
+    records = _annual_records(years, names, values)
+    prefix = Path(figure_dir) / "plot_yearly_trends"
+    _render_yearly_trends(
+        years,
+        names,
+        values,
+        records,
+        prefix,
+        display_names=[npp_data[name]["en_name"] for name in names],
+    )
+    _export_annual_records(records, prefix)
+    slopes = [row["slope"] for row in records if row["series_type"] == "site"]
     return {"slopes": slopes, "mean_slope": np.mean(slopes), "std_slope": np.std(slopes)}
+
+
+def plot_annual_archive(
+    input_path: str | Path,
+    output_prefix: str | Path,
+    npp_data: Dict[str, dict],
+    start_year: int = 1949,
+    end_year: int = 2024,
+    subset_output_prefix: str | Path | None = None,
+    subset_start_year: int = 1980,
+) -> None:
+    """Plot Figure 2 from an archive of unsmoothed, globally normalized annual TCIN."""
+    with np.load(Path(input_path), allow_pickle=False) as archive:
+        all_years = np.asarray(archive["years"], dtype=int)
+        names = [str(name) for name in archive["names"]]
+        all_values = np.asarray(archive["values"], dtype=float)
+    if (
+        all_values.shape != (20, len(all_years))
+        or len(names) != 20
+        or len(set(names)) != 20
+        or not np.isfinite(all_values).all()
+        or not np.all(np.diff(all_years) == 1)
+    ):
+        raise ValueError(
+            "Expected twenty ordered sites and finite annual values in consecutive years."
+        )
+
+    periods = [(start_year, end_year, Path(output_prefix))]
+    if subset_output_prefix is not None:
+        periods.append((subset_start_year, end_year, Path(subset_output_prefix)))
+    results = []
+    for period_start, period_end, prefix in periods:
+        selected = (all_years >= period_start) & (all_years <= period_end)
+        years = all_years[selected]
+        if not np.array_equal(years, np.arange(period_start, period_end + 1)):
+            raise ValueError("The input must contain every requested calendar year.")
+        values = all_values[:, selected]
+        if len(years) >= 5:
+            window = min(9, len(years) if len(years) % 2 else len(years) - 1)
+            values = signal.savgol_filter(values, window, min(3, window - 1), axis=1)
+        records = _annual_records(years, names, values)
+        results.append((years, values, records, prefix))
+
+    low = min(float(result[1].min()) for result in results)
+    high = max(float(result[1].max()) for result in results)
+    margin = 0.1 * (high - low) if high > low else 0.1
+    display_names = [npp_data[name]["en_name"] for name in names]
+    for years, values, records, prefix in results:
+        _render_yearly_trends(
+            years,
+            names,
+            values,
+            records,
+            prefix,
+            display_names=display_names,
+            y_limits=(low - margin, high + margin),
+        )
+        _export_annual_records(records, prefix)
+        print(f"Saved {years[0]}-{years[-1]}: {prefix}")
 
 
 def plot_fourier_analysis(
@@ -499,7 +741,11 @@ def plot_fourier_analysis(
 
             windowed = values * np.hamming(len(values))
             padded_length = 2 ** int(np.ceil(np.log2(len(windowed) * 4)))
-            spectrum = np.abs(np.fft.fft(windowed, n=padded_length)) ** 2 / padded_length
+            spectrum = (
+                np.abs(np.fft.fft(windowed, n=padded_length)) ** 2
+                / np.sum(np.hamming(len(values)) ** 2)
+            )
+            spectrum[1 : padded_length // 2] *= 2.0
             spectrum = spectrum[: padded_length // 2][1:]
             periods = 1.0 / np.fft.fftfreq(padded_length, 1.0)[1 : padded_length // 2]
             valid = (periods >= 2) & (periods <= 35)
@@ -593,113 +839,263 @@ def plot_monthly_trends(
     npp_data: Dict[str, dict],
     figure_dir: str | Path = DEFAULT_FIGURE_DIR,
 ) -> dict:
-    """Plot monthly TCIN climatology by regional NPP group."""
+    """Linear monthly distributions with upper-tail flags and right-hand legends."""
     figure_dir = Path(figure_dir)
     figure_dir.mkdir(parents=True, exist_ok=True)
-    npp_names = list(indices)
-    groups = _group_names(npp_names)
-    months = list(range(1, 13))
+    names = list(indices)
+    groups = _group_names(names)
+    months = np.arange(1, 13)
     month_labels = list("JFMAMJJASOND")
-    all_values = [
-        value for site in indices.values()
-        for month_values in site.values() for value in month_values.values()
-    ]
-    y_max = np.percentile(all_values, 95)
-    y_limits = (0, y_max * 1.5)
-
-    fig = plt.figure(figsize=(16, 20))
-    grid = gridspec.GridSpec(
-        8, 4,
-        hspace=0.12, wspace=0.10, left=0.08, right=0.98, top=0.955, bottom=0.12,
-        height_ratios=[0.02, 1, 1, 1, 1, 1, 1, 1],
+    data = {
+        name: [list(indices[name][month].values()) or [0.0] for month in months]
+        for name in names
+    }
+    focus_upper = 0.25
+    largest_q3 = max(
+        np.percentile(values, 75)
+        for site in data.values()
+        for values in site
     )
-    site_number = 0
+    focus_upper = max(
+        focus_upper,
+        float(np.ceil(largest_q3 * 1.1 / 0.05) * 0.05),
+    )
+
+    fig = plt.figure(figsize=(16, 22))
+    grid = fig.add_gridspec(
+        9,
+        4,
+        hspace=0.24,
+        wspace=0.12,
+        left=0.08,
+        right=0.98,
+        top=0.955,
+        bottom=0.10,
+        height_ratios=[0.02, 1, 1, 1, 1, 1, 1, 1, 1.1],
+    )
     regional_stats = {}
+    upper_summary = 0.0
+    for group in groups:
+        site_means = np.array(
+            [[np.mean(values) for values in data[name]] for name in group]
+        )
+        upper_summary = max(
+            upper_summary,
+            float(np.max(site_means.mean(axis=0) + site_means.std(axis=0))),
+        )
+    summary_upper = max(0.05, np.ceil(upper_summary * 1.3 / 0.05) * 0.05)
 
     for column, (group, region) in enumerate(zip(groups, REGION_NAMES)):
-        title_ax = fig.add_subplot(grid[0, column])
-        title_ax.axis("off")
-        title_ax.text(0, 0.95, f"({chr(97 + column)}) {region}",
-                      transform=title_ax.transAxes, ha="left", va="top",
-                      fontweight="bold")
-        site_month_means = {month: [] for month in months}
-        site_values = {month: [] for month in months}
-
-        for row, npp_name in enumerate(group):
-            site_number += 1
-            ax = fig.add_subplot(grid[row + 1, column])
-            monthly_data = []
-            for month in months:
-                values = list(indices[npp_name][month].values()) or [0]
-                monthly_data.append(values)
-                site_values[month].extend(values)
-                site_month_means[month].append(np.mean(values))
-
+        title = fig.add_subplot(grid[0, column])
+        title.axis("off")
+        title.text(
+            0,
+            0.95,
+            f"({chr(97 + column)}) {region}",
+            ha="left",
+            va="top",
+            transform=title.transAxes,
+            fontsize=20,
+        )
+        for row, name in enumerate(group, 1):
+            ax = fig.add_subplot(grid[row, column])
+            observations = data[name]
             ax.boxplot(
-                monthly_data, positions=months, widths=0.6,
-                patch_artist=True, showfliers=False,
-                boxprops={"facecolor": NATURE_COLORS[0], "alpha": 0.3},
-                medianprops={"color": NATURE_COLORS[1], "linewidth": 1.5},
-                whiskerprops={"linewidth": 0.8}, capprops={"linewidth": 0.8},
+                observations,
+                positions=months,
+                widths=0.62,
+                patch_artist=True,
+                whis=1.5,
+                showfliers=False,
+                boxprops=dict(
+                    facecolor=NATURE_COLORS[0],
+                    alpha=0.32,
+                    linewidth=0.8,
+                ),
+                medianprops=dict(color="#CC6B00", linewidth=2.2, zorder=6),
+                whiskerprops=dict(color=".42", linewidth=0.8),
+                capprops=dict(color=".42", linewidth=0.8),
             )
-            ax.plot(months, [np.mean(values) for values in monthly_data],
-                    "o-", color=NATURE_COLORS[2], markersize=5,
-                    linewidth=1, alpha=0.7)
-            ax.set_ylim(y_limits)
-            ax.set_xlim(0.5, 12.5)
-            ax.grid(True, alpha=0.2, linewidth=0.5, axis="y")
-            ax.text(0.02, 0.95, f"{site_number}. {npp_data[npp_name]['en_name']}",
-                    transform=ax.transAxes, ha="left", va="top")
-            if column:
-                ax.set_yticklabels([])
+            ax.plot(
+                months,
+                [np.mean(values) for values in observations],
+                "o-",
+                color=NATURE_COLORS[2],
+                linewidth=1,
+                markersize=4.5,
+                alpha=0.85,
+                zorder=5,
+            )
+            above = np.array(
+                [max(values) > focus_upper for values in observations]
+            )
+            ax.scatter(
+                months[above],
+                np.full(above.sum(), 0.972 * focus_upper),
+                marker="^",
+                s=17,
+                facecolor=".45",
+                edgecolor="white",
+                linewidth=0.35,
+                zorder=7,
+            )
+            ax.set(
+                xlim=(0.5, 12.5),
+                ylim=(-0.048 * focus_upper, 1.14 * focus_upper),
+            )
+            ax.yaxis.set_major_locator(
+                FixedLocator([0, 0.4 * focus_upper, 0.8 * focus_upper])
+            )
+            ax.yaxis.set_major_formatter(
+                FuncFormatter(lambda value, _: f"{value:g}")
+            )
+            ax.set_xticks(months)
             ax.set_xticklabels([])
-            ax.spines["top"].set_visible(False)
-            ax.spines["right"].set_visible(False)
+            if column:
+                ax.tick_params(axis="y", labelleft=False)
+            ax.tick_params(axis="both", length=2.5)
+            ax.grid(axis="y", alpha=0.18, linewidth=0.5)
+            ax.set_axisbelow(True)
+            ax.spines[["top", "right"]].set_visible(False)
+            ax.text(
+                0.02,
+                0.97,
+                f"{names.index(name) + 1}. {npp_data[name]['en_name']}",
+                transform=ax.transAxes,
+                va="top",
+                ha="left",
+                fontsize=19,
+                bbox=dict(facecolor="white", edgecolor="none", pad=1),
+            )
 
-        ax_summary = fig.add_subplot(grid[7, column])
-        means = np.array([np.mean(site_month_means[month]) for month in months])
-        stds = np.array([np.std(site_month_means[month]) for month in months])
+        site_means = np.array(
+            [[np.mean(values) for values in data[name]] for name in group]
+        )
+        means = site_means.mean(axis=0)
+        stds = site_means.std(axis=0)
         regional_stats[f"({chr(97 + column)}) {region}"] = {
-            "means": means.tolist(), "stds": stds.tolist(),
+            "means": means.tolist(),
+            "stds": stds.tolist(),
         }
-        ax_summary.fill_between(months, means - stds, means + stds,
-                                alpha=0.25, color=NATURE_COLORS[2], label="±1 SD")
-        ax_summary.plot(months, means, "o-", color=NATURE_COLORS[0],
-                        markersize=4, linewidth=1, label="Mean")
-        ax_summary.set_ylim(y_limits)
-        ax_summary.set_xlim(0.5, 12.5)
-        ax_summary.grid(True, alpha=0.2, linewidth=0.5, axis="y")
-        ax_summary.set_facecolor("#F5F5F5")
-        ax_summary.set_xticks(months)
-        ax_summary.set_xticklabels(month_labels)
+        ax = fig.add_subplot(grid[8, column])
+        ax.fill_between(
+            months,
+            means - stds,
+            means + stds,
+            color=NATURE_COLORS[2],
+            alpha=0.22,
+        )
+        ax.plot(
+            months,
+            means,
+            "o-",
+            color=NATURE_COLORS[0],
+            markersize=4,
+            linewidth=1,
+        )
+        ax.set(
+            xlim=(0.5, 12.5),
+            ylim=(0, summary_upper),
+            facecolor="#F5F5F5",
+        )
+        ax.set_xticks(months, month_labels)
+        ax.yaxis.set_major_locator(
+            FixedLocator(
+                [
+                    0,
+                    0.25 * summary_upper,
+                    0.5 * summary_upper,
+                    0.75 * summary_upper,
+                ]
+            )
+        )
+        ax.yaxis.set_major_formatter(
+            FuncFormatter(lambda value, _: f"{value:g}")
+        )
         if column:
-            ax_summary.set_yticklabels([])
-        ax_summary.spines["top"].set_visible(False)
-        ax_summary.spines["right"].set_visible(False)
+            ax.tick_params(axis="y", labelleft=False)
+        ax.text(
+            0.02,
+            0.96,
+            "Mean ± site SD",
+            transform=ax.transAxes,
+            va="top",
+            ha="left",
+            fontsize=18,
+        )
+        ax.grid(axis="y", alpha=0.18, linewidth=0.5)
+        ax.spines[["top", "right"]].set_visible(False)
 
-    fig.text(0.02, 0.5, "TCIN Intensity", va="center", rotation="vertical")
-    fig.text(0.5, 0.09, "Month", ha="center")
-    legend_ax = fig.add_subplot(grid[4, 3])
-    legend_ax.axis("off")
-    legend_ax.legend(handles=[
-        Line2D([], [], marker="o", color="w", markerfacecolor=NATURE_COLORS[2],
-               markersize=7, linestyle="None", label="Mean"),
-        Line2D([], [], color=NATURE_COLORS[1], linewidth=1.5, label="Median"),
-        Patch(facecolor=NATURE_COLORS[0], alpha=0.3, label="IQR"),
-    ], loc="center", frameon=False, ncol=1, labelspacing=1.2)
-    legend_ax_summary = fig.add_subplot(grid[6, 3])
-    legend_ax_summary.axis("off")
-    legend_ax_summary.legend(handles=[
-        Patch(facecolor=NATURE_COLORS[2], alpha=0.25,
-              edgecolor=NATURE_COLORS[2], label="±1 SD"),
-        Line2D([], [], color=NATURE_COLORS[0], marker="o", markersize=5,
-               linewidth=1, label="Mean"),
-    ], loc="center", frameon=False, ncol=1, labelspacing=1.2)
-
-    output = figure_dir / "plot_monthly_trends.png"
-    fig.savefig(output, dpi=300, bbox_inches="tight")
+    legend = fig.add_subplot(grid[4, 3])
+    legend.axis("off")
+    legend.legend(
+        handles=[
+            Patch(facecolor=NATURE_COLORS[0], alpha=0.32, label="IQR"),
+            Line2D([], [], color="#CC6B00", linewidth=2.2, label="Median"),
+            Line2D(
+                [],
+                [],
+                color=NATURE_COLORS[2],
+                marker="o",
+                markersize=5,
+                linewidth=1,
+                label="Mean",
+            ),
+            Line2D(
+                [],
+                [],
+                color=".45",
+                marker="^",
+                markersize=6,
+                linestyle="None",
+                label=f"> {focus_upper:g}",
+            ),
+        ],
+        loc="center",
+        ncol=1,
+        frameon=False,
+        fontsize=18,
+        labelspacing=0.7,
+        handlelength=1.4,
+        handletextpad=0.6,
+    )
+    summary_legend = fig.add_subplot(grid[6, 3])
+    summary_legend.axis("off")
+    summary_legend.legend(
+        handles=[
+            Patch(facecolor=NATURE_COLORS[2], alpha=0.22, label="±1 site SD"),
+            Line2D(
+                [],
+                [],
+                color=NATURE_COLORS[0],
+                marker="o",
+                markersize=4,
+                linewidth=1,
+                label="Regional mean",
+            ),
+        ],
+        loc="center",
+        ncol=1,
+        frameon=False,
+        fontsize=18,
+        labelspacing=0.9,
+    )
+    fig.text(
+        0.018,
+        0.52,
+        "TCIN intensity",
+        rotation="vertical",
+        va="center",
+        fontsize=20,
+    )
+    fig.text(0.5, 0.064, "Month", ha="center", fontsize=20)
+    for extension in ("png", "pdf", "svg"):
+        fig.savefig(
+            figure_dir / f"plot_monthly_trends.{extension}",
+            dpi=300,
+            bbox_inches="tight",
+        )
     plt.close(fig)
-    print(f"Saved: {output}")
     return regional_stats
 
 
@@ -709,13 +1105,56 @@ def main() -> None:
     parser.add_argument("--figures-dir", default=str(DEFAULT_FIGURE_DIR))
     parser.add_argument("--start-year", type=int, default=2020)
     parser.add_argument("--end-year", type=int, default=2024)
-    parser.add_argument("--weight-method", default="inverse",
-                        choices=["inverse", "inverse_square", "exponential", "gaussian"])
-    parser.add_argument("--smoothing", default="savgol",
-                        choices=["savgol", "gaussian", "moving_average", "none"])
+    parser.add_argument(
+        "--weight-method",
+        default="gaussian",
+        choices=["inverse", "inverse_square", "exponential", "gaussian"],
+    )
+    parser.add_argument(
+        "--smoothing",
+        default="savgol",
+        choices=["savgol", "gaussian", "moving_average", "none"],
+    )
+    parser.add_argument(
+        "--monthly-smoothing",
+        default="none",
+        choices=["none", "savgol", "gaussian", "moving_average"],
+        help="Monthly TCIN is unsmoothed by default",
+    )
+    parser.add_argument(
+        "--monthly-map",
+        action="store_true",
+        help="Also generate Figure 5",
+    )
+    parser.add_argument(
+        "--annual-input",
+        type=Path,
+        help="Plot Figure 2 from an NPZ archive instead of the example best tracks",
+    )
+    parser.add_argument(
+        "--annual-output-prefix",
+        type=Path,
+        default=DEFAULT_FIGURE_DIR / "figure_2",
+    )
+    parser.add_argument("--annual-start-year", type=int, default=1949)
+    parser.add_argument("--annual-end-year", type=int, default=2024)
+    parser.add_argument("--subset-output-prefix", type=Path)
+    parser.add_argument("--subset-start-year", type=int, default=1980)
     args = parser.parse_args()
 
     npp_data = NPP
+    if args.annual_input is not None:
+        plot_annual_archive(
+            args.annual_input,
+            args.annual_output_prefix,
+            npp_data,
+            start_year=args.annual_start_year,
+            end_year=args.annual_end_year,
+            subset_output_prefix=args.subset_output_prefix,
+            subset_start_year=args.subset_start_year,
+        )
+        return
+
     typhoons = load_typhoons(args.start_year, args.end_year, args.data_dir)
     if not typhoons:
         raise RuntimeError("No best-track data was loaded")
@@ -731,9 +1170,12 @@ def main() -> None:
     )
     plot_fourier_analysis(yearly_smoothed, npp_data, args.figures_dir)
     monthly = calculate_monthly_indices(
-        typhoons, npp_data, args.weight_method, args.smoothing
+        typhoons, npp_data, args.weight_method, args.monthly_smoothing
     )
     plot_monthly_trends(monthly, npp_data, args.figures_dir)
+    if args.monthly_map:
+        from tcin.monthly_map import plot_monthly_map
+        plot_monthly_map(monthly, npp_data, args.figures_dir)
 
 
 if __name__ == "__main__":
